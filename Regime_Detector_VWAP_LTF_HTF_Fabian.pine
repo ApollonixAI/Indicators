@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: LicenseRef-ApollonixAI-Proprietary
 // License: Proprietary - use, copying, modification, distribution, or commercial use requires written permission from ApollonixAI.
 
-indicator("Regime Detector - VWAP LTF/HTF Fabian", shorttitle="Regime VWAP Fabian", overlay=true, max_labels_count=100)
+indicator("ApollonixAI Regime Detector", shorttitle="APX Regime", overlay=true, max_labels_count=100)
 
 // This indicator is designed to be paired with strategies through its numeric plots:
 // REGIME_DIR = 1 long, -1 short, 0 neutral.

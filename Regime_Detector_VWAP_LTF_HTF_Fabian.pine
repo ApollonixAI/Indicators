@@ -1,0 +1,157 @@
+//@version=6
+indicator("Regime Detector - VWAP LTF/HTF Fabian", shorttitle="Regime VWAP Fabian", overlay=true, max_labels_count=100)
+
+// This indicator is designed to be paired with strategies through its numeric plots:
+// REGIME_DIR = 1 long, -1 short, 0 neutral.
+// LONG_ALLOWED and SHORT_ALLOWED are binary gates.
+
+groupCore = "Core"
+htfTf = input.timeframe("60", "HTF confluence timeframe", group=groupCore)
+useConfirmedMtf = input.bool(true, "Use confirmed HTF/Fabian bars", group=groupCore, tooltip="Uses the previous higher-timeframe bar to reduce repainting from incomplete HTF candles.")
+scoreThreshold = input.float(3.0, "Directional score threshold", minval=0.5, step=0.5, group=groupCore)
+fabianMode = input.string("Veto", "Fabian timing role", options=["Score only", "Veto", "Hard gate"], group=groupCore)
+
+groupWeights = "Weights"
+wLtfVwap = input.float(1.5, "LTF VWAP weight", step=0.25, group=groupWeights)
+wLtfTrend = input.float(1.0, "LTF trend weight", step=0.25, group=groupWeights)
+wHtfVwap = input.float(1.5, "HTF VWAP weight", step=0.25, group=groupWeights)
+wHtfTrend = input.float(2.0, "HTF trend weight", step=0.25, group=groupWeights)
+wFabian = input.float(2.0, "Fabian timing weight", step=0.25, group=groupWeights)
+
+groupVwap = "VWAP"
+vwapSrc = input.source(hlc3, "VWAP source", group=groupVwap)
+vwapAnchorTf = input.timeframe("D", "VWAP anchor", options=["D", "W", "M"], group=groupVwap)
+vwapSlopeLen = input.int(5, "VWAP slope lookback", minval=1, group=groupVwap)
+vwapBufferTicks = input.int(4, "VWAP buffer in ticks", minval=0, group=groupVwap)
+
+groupTrend = "LTF/HTF Trend"
+ltfFastLen = input.int(21, "LTF fast EMA", minval=1, group=groupTrend)
+ltfSlowLen = input.int(55, "LTF slow EMA", minval=2, group=groupTrend)
+htfFastLen = input.int(21, "HTF fast EMA", minval=1, group=groupTrend)
+htfSlowLen = input.int(55, "HTF slow EMA", minval=2, group=groupTrend)
+htfSlopeLen = input.int(3, "HTF slow EMA slope lookback", minval=1, group=groupTrend)
+
+groupFabian = "Modified Fabian Timing"
+fabianTf = input.timeframe("W", "Fabian timeframe", group=groupFabian)
+fabianLen = input.int(39, "Fabian MA length", minval=2, group=groupFabian, tooltip="Classic Fabian timing uses a 39-week moving average. Keep W/39 for the classic baseline, or use D/200 for a daily futures adaptation.")
+fabianSlopeLen = input.int(2, "Fabian MA slope lookback", minval=1, group=groupFabian)
+fabianConfirmBars = input.int(1, "Fabian confirmation bars", minval=1, group=groupFabian)
+fabianBufferPct = input.float(0.15, "Fabian buffer percent", minval=0.0, step=0.05, group=groupFabian)
+
+groupVisual = "Visuals"
+showVwap = input.bool(true, "Show VWAP", group=groupVisual)
+showTrendEma = input.bool(false, "Show LTF EMAs", group=groupVisual)
+showBackground = input.bool(true, "Show regime background", group=groupVisual)
+showSignals = input.bool(true, "Show regime-change labels", group=groupVisual)
+showTable = input.bool(true, "Show status table", group=groupVisual)
+
+f_state(bool bull, bool bear) =>
+    bull ? 1 : bear ? -1 : 0
+
+f_stateText(int state) =>
+    state == 1 ? "Bull" : state == -1 ? "Bear" : "Neutral"
+
+f_stateColor(int state) =>
+    state == 1 ? color.new(color.lime, 15) : state == -1 ? color.new(color.red, 15) : color.new(color.gray, 35)
+
+tickBuffer = syminfo.mintick * vwapBufferTicks
+
+vwapAnchor = timeframe.change(vwapAnchorTf)
+ltfVwap = ta.vwap(vwapSrc, vwapAnchor)
+ltfVwapSlope = ltfVwap - ltfVwap[vwapSlopeLen]
+ltfVwapBull = not na(ltfVwap) and close > ltfVwap + tickBuffer and ltfVwapSlope > 0
+ltfVwapBear = not na(ltfVwap) and close < ltfVwap - tickBuffer and ltfVwapSlope < 0
+ltfVwapState = f_state(ltfVwapBull, ltfVwapBear)
+
+ltfFast = ta.ema(close, ltfFastLen)
+ltfSlow = ta.ema(close, ltfSlowLen)
+ltfTrendBull = ltfFast > ltfSlow and close > ltfFast
+ltfTrendBear = ltfFast < ltfSlow and close < ltfFast
+ltfTrendState = f_state(ltfTrendBull, ltfTrendBear)
+
+f_htfTrendState() =>
+    fast = ta.ema(close, htfFastLen)
+    slow = ta.ema(close, htfSlowLen)
+    slowSlope = slow - slow[htfSlopeLen]
+    bull = fast > slow and close > fast and slowSlope > 0
+    bear = fast < slow and close < fast and slowSlope < 0
+    f_state(bull, bear)
+
+f_htfVwapState() =>
+    hvwap = ta.vwap(hlc3, timeframe.change(vwapAnchorTf))
+    hvwapSlope = hvwap - hvwap[vwapSlopeLen]
+    bull = not na(hvwap) and close > hvwap + tickBuffer and hvwapSlope > 0
+    bear = not na(hvwap) and close < hvwap - tickBuffer and hvwapSlope < 0
+    f_state(bull, bear)
+
+f_fabianState() =>
+    ma = ta.sma(close, fabianLen)
+    maSlope = ma - ma[fabianSlopeLen]
+    buffer = fabianBufferPct * 0.01
+    bullRaw = not na(ma) and close > ma * (1.0 + buffer) and maSlope >= 0
+    bearRaw = not na(ma) and close < ma * (1.0 - buffer) and maSlope <= 0
+    bullBarsSinceInvalid = ta.barssince(not bullRaw)
+    bearBarsSinceInvalid = ta.barssince(not bearRaw)
+    bullConfirmed = bullRaw and nz(bullBarsSinceInvalid, fabianConfirmBars - 1) >= fabianConfirmBars - 1
+    bearConfirmed = bearRaw and nz(bearBarsSinceInvalid, fabianConfirmBars - 1) >= fabianConfirmBars - 1
+    f_state(bullConfirmed, bearConfirmed)
+
+htfTrendState = request.security(syminfo.tickerid, htfTf, useConfirmedMtf ? f_htfTrendState()[1] : f_htfTrendState(), barmerge.gaps_off, barmerge.lookahead_off)
+htfVwapState = request.security(syminfo.tickerid, htfTf, useConfirmedMtf ? f_htfVwapState()[1] : f_htfVwapState(), barmerge.gaps_off, barmerge.lookahead_off)
+
+fabianState = request.security(syminfo.tickerid, fabianTf, useConfirmedMtf ? f_fabianState()[1] : f_fabianState(), barmerge.gaps_off, barmerge.lookahead_off)
+
+regimeScore = ltfVwapState * wLtfVwap + ltfTrendState * wLtfTrend + htfVwapState * wHtfVwap + htfTrendState * wHtfTrend + fabianState * wFabian
+
+rawLong = regimeScore >= scoreThreshold
+rawShort = regimeScore <= -scoreThreshold
+
+fabianLongPass = fabianMode == "Score only" ? true : fabianMode == "Veto" ? fabianState != -1 : fabianState == 1
+fabianShortPass = fabianMode == "Score only" ? true : fabianMode == "Veto" ? fabianState != 1 : fabianState == -1
+
+longAllowed = rawLong and fabianLongPass
+shortAllowed = rawShort and fabianShortPass
+regimeDir = longAllowed ? 1 : shortAllowed ? -1 : 0
+
+regimeBg = regimeDir == 1 ? color.new(color.lime, 88) : regimeDir == -1 ? color.new(color.red, 88) : color.new(color.gray, 93)
+bgcolor(showBackground ? regimeBg : na, title="Regime background")
+
+plot(showVwap ? ltfVwap : na, "Anchored VWAP", color=color.new(color.yellow, 0), linewidth=2)
+plot(showTrendEma ? ltfFast : na, "LTF Fast EMA", color=color.new(color.aqua, 0), linewidth=1)
+plot(showTrendEma ? ltfSlow : na, "LTF Slow EMA", color=color.new(color.orange, 0), linewidth=1)
+
+plotshape(showSignals and regimeDir == 1 and regimeDir[1] != 1, title="Long Regime Start", text="LONG", style=shape.labelup, location=location.belowbar, color=color.new(color.lime, 0), textcolor=color.black, size=size.tiny)
+plotshape(showSignals and regimeDir == -1 and regimeDir[1] != -1, title="Short Regime Start", text="SHORT", style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 0), textcolor=color.white, size=size.tiny)
+plotshape(showSignals and regimeDir == 0 and regimeDir[1] != 0, title="Neutral Regime Start", text="NEUTRAL", style=shape.circle, location=location.top, color=color.new(color.gray, 0), textcolor=color.white, size=size.tiny)
+
+plot(regimeDir, "REGIME_DIR", color=color.new(color.white, 100), display=display.data_window)
+plot(longAllowed ? 1 : 0, "LONG_ALLOWED", color=color.new(color.lime, 100), display=display.data_window)
+plot(shortAllowed ? 1 : 0, "SHORT_ALLOWED", color=color.new(color.red, 100), display=display.data_window)
+plot(regimeScore, "REGIME_SCORE", color=color.new(color.blue, 100), display=display.data_window)
+plot(fabianState, "FABIAN_STATE", color=color.new(color.purple, 100), display=display.data_window)
+
+alertcondition(longAllowed and not longAllowed[1], "Long regime allowed", "Regime Detector: long futures regime allowed.")
+alertcondition(shortAllowed and not shortAllowed[1], "Short regime allowed", "Regime Detector: short futures regime allowed.")
+alertcondition(regimeDir == 0 and regimeDir[1] != 0, "Neutral regime", "Regime Detector: neutral/no-trade regime.")
+
+var table status = table.new(position.top_right, 2, 8, border_width=1)
+
+if showTable and barstate.islast
+    table.cell(status, 0, 0, "Component", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(status, 1, 0, "State", text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(status, 0, 1, "Regime", text_color=color.white, bgcolor=color.new(color.black, 10))
+    table.cell(status, 1, 1, regimeDir == 1 ? "LONG" : regimeDir == -1 ? "SHORT" : "NEUTRAL", text_color=color.white, bgcolor=f_stateColor(regimeDir))
+    table.cell(status, 0, 2, "Score", text_color=color.white, bgcolor=color.new(color.black, 10))
+    table.cell(status, 1, 2, str.tostring(regimeScore, "#.##"), text_color=color.white, bgcolor=color.new(color.black, 10))
+    table.cell(status, 0, 3, "LTF VWAP", text_color=color.white, bgcolor=color.new(color.black, 10))
+    table.cell(status, 1, 3, f_stateText(ltfVwapState), text_color=color.white, bgcolor=f_stateColor(ltfVwapState))
+    table.cell(status, 0, 4, "LTF Trend", text_color=color.white, bgcolor=color.new(color.black, 10))
+    table.cell(status, 1, 4, f_stateText(ltfTrendState), text_color=color.white, bgcolor=f_stateColor(ltfTrendState))
+    table.cell(status, 0, 5, "HTF VWAP", text_color=color.white, bgcolor=color.new(color.black, 10))
+    table.cell(status, 1, 5, f_stateText(htfVwapState) + " " + htfTf, text_color=color.white, bgcolor=f_stateColor(htfVwapState))
+    table.cell(status, 0, 6, "HTF Trend", text_color=color.white, bgcolor=color.new(color.black, 10))
+    table.cell(status, 1, 6, f_stateText(htfTrendState) + " " + htfTf, text_color=color.white, bgcolor=f_stateColor(htfTrendState))
+    table.cell(status, 0, 7, "Fabian", text_color=color.white, bgcolor=color.new(color.black, 10))
+    table.cell(status, 1, 7, f_stateText(fabianState) + " " + fabianTf + "/" + str.tostring(fabianLen), text_color=color.white, bgcolor=f_stateColor(fabianState))
+else if not showTable and barstate.islast
+    table.clear(status, 0, 0)

@@ -1,4 +1,8 @@
 //@version=6
+// Copyright (c) 2026 ApollonixAI. All rights reserved.
+// SPDX-License-Identifier: LicenseRef-ApollonixAI-Proprietary
+// License: Proprietary - use, copying, modification, distribution, or commercial use requires written permission from ApollonixAI.
+
 indicator("Regime Detector - VWAP LTF/HTF Fabian", shorttitle="Regime VWAP Fabian", overlay=true, max_labels_count=100)
 
 // This indicator is designed to be paired with strategies through its numeric plots:
